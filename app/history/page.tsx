@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { Task, User } from '@/lib/db';
 import { TaskCard } from '@/components/TaskCard';
+import { ContributionHeatmap } from '@/components/ContributionHeatmap';
 
 // Local avatar mapper for emoji-free design
 const AVATAR_MAP: Record<string, React.ComponentType<{ className?: string; strokeWidth?: number }>> = {
@@ -143,6 +144,10 @@ export default function History() {
   const [loading, setLoading] = useState(true);
   const [activeMobileUserId, setActiveMobileUserId] = useState<string | null>(null);
 
+  // Heatmap state: sparse map of YYYY-MM-DD → completed task count
+  const [heatmapCounts, setHeatmapCounts] = useState<Record<string, number>>({});
+  const [heatmapLoading, setHeatmapLoading] = useState(false);
+
   // Fetch Board details for selected date
   const fetchHistoryBoard = useCallback(async (dateStr: string) => {
     setLoading(true);
@@ -182,6 +187,28 @@ export default function History() {
     }, 0);
     return () => clearTimeout(timer);
   }, [selectedDate, fetchHistoryBoard]);
+
+  // Fetch heatmap once the current user is known
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    async function fetchHeatmap() {
+      setHeatmapLoading(true);
+      try {
+        const res = await fetch(`/api/heatmap?userId=${currentUser!.id}&months=12`);
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          setHeatmapCounts(data.counts ?? {});
+        }
+      } catch (e) {
+        console.error('Failed to load heatmap data', e);
+      } finally {
+        if (!cancelled) setHeatmapLoading(false);
+      }
+    }
+    fetchHeatmap();
+    return () => { cancelled = true; };
+  }, [currentUser]);
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.value) {
@@ -250,7 +277,24 @@ export default function History() {
 
       {/* Main Board Layout */}
       <main className="max-w-[1400px] w-full mx-auto px-4 mt-6 flex-1 flex flex-col z-10">
-        
+
+        {/* ── Contribution Heatmap ── */}
+        {heatmapLoading ? (
+          // Skeleton shimmer while data loads
+          <div className="double-bezel-outer rounded-[1.75rem] p-1 mb-8 animate-pulse">
+            <div className="double-bezel-inner rounded-[calc(1.75rem-0.25rem)] p-5 sm:p-6">
+              <div className="h-4 w-40 bg-white/5 rounded-lg mb-4" />
+              <div className="h-[92px] w-full bg-white/[0.03] rounded-xl" />
+            </div>
+          </div>
+        ) : (
+          <ContributionHeatmap
+            counts={heatmapCounts}
+            months={12}
+            userColor={currentUser?.color ?? 'indigo'}
+          />
+        )}
+
         {/* Bento Stats Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-8">
           {/* Card 1: Completion rate progress */}

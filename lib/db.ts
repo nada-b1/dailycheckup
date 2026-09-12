@@ -210,6 +210,73 @@ export async function updateTask(
   }
 }
 
+/**
+ * Returns a sparse map of { dateStr -> completedTaskCount } for a given user
+ * within a date range. Only days with at least 1 completed task appear in the map.
+ *
+ * Because tasks live in boards[dateStr], the board key IS the completion date —
+ * no completedAt field is required on the task itself.
+ *
+ * @param userId   - The user to aggregate for
+ * @param startDate - Inclusive start date string "YYYY-MM-DD"
+ * @param endDate   - Inclusive end date string "YYYY-MM-DD"
+ */
+export async function getCompletedTaskCountsByUser(
+  userId: string,
+  startDate: string,
+  endDate: string
+): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+
+  if (useLocalDB) {
+    const db = initLocalDB();
+    for (const [dateStr, boardMap] of Object.entries(db.boards)) {
+      // Skip dates outside the requested range
+      if (dateStr < startDate || dateStr > endDate) continue;
+      const doneTasks = Object.values(boardMap).filter(
+        (t) => t.userId === userId && t.status === 'done'
+      );
+      if (doneTasks.length > 0) {
+        counts[dateStr] = doneTasks.length;
+      }
+    }
+  } else {
+    // Vercel KV: boards are stored as hash keys "board:YYYY-MM-DD"
+    // We scan all keys matching the pattern then filter by date range
+    try {
+      // kv.keys returns all matching keys; use cursor-scan for large datasets
+      let cursor = 0;
+      do {
+        // @ts-expect-error — @vercel/kv exposes scan via the underlying ioredis client
+        const [nextCursor, keys]: [number, string[]] = await kv.scan(cursor, {
+          match: 'board:*',
+          count: 200,
+        });
+        cursor = nextCursor;
+
+        for (const key of keys) {
+          const dateStr = key.replace('board:', '');
+          if (dateStr < startDate || dateStr > endDate) continue;
+
+          const boardTasksMap = await kv.hgetall<Record<string, Task>>(key);
+          if (!boardTasksMap) continue;
+
+          const doneTasks = Object.values(boardTasksMap).filter(
+            (t) => t.userId === userId && t.status === 'done'
+          );
+          if (doneTasks.length > 0) {
+            counts[dateStr] = doneTasks.length;
+          }
+        }
+      } while (cursor !== 0);
+    } catch (e) {
+      console.error('KV Error in getCompletedTaskCountsByUser', e);
+    }
+  }
+
+  return counts;
+}
+
 export async function deleteTask(dateStr: string, taskId: string): Promise<boolean> {
   if (useLocalDB) {
     const db = initLocalDB();
