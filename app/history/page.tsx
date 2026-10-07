@@ -142,11 +142,9 @@ export default function History() {
   const [users, setUsers] = useState<Omit<User, 'pin'>[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [activeMobileUserId, setActiveMobileUserId] = useState<string | null>(null);
-
-  // Heatmap state: sparse map of YYYY-MM-DD → completed task count
-  const [heatmapCounts, setHeatmapCounts] = useState<Record<string, number>>({});
-  const [heatmapLoading, setHeatmapLoading] = useState(false);
+  const [heatmapStats, setHeatmapStats] = useState<{ totalCompleted: number; streak: number } | null>(null);
 
   // Fetch Board details for selected date
   const fetchHistoryBoard = useCallback(async (dateStr: string) => {
@@ -162,9 +160,8 @@ export default function History() {
         const authData = await authRes.json();
         setCurrentUser(authData.user);
         
-        if (!activeMobileUserId) {
-          setActiveMobileUserId(authData.user.id);
-        }
+        setSelectedUserId(prev => prev ?? authData.user.id);
+        setActiveMobileUserId(prev => prev ?? authData.user.id);
       }
 
       // 2. Fetch Board State for dateStr
@@ -179,7 +176,7 @@ export default function History() {
     } finally {
       setLoading(false);
     }
-  }, [currentUser, activeMobileUserId, router]);
+  }, [currentUser, router]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -187,28 +184,6 @@ export default function History() {
     }, 0);
     return () => clearTimeout(timer);
   }, [selectedDate, fetchHistoryBoard]);
-
-  // Fetch heatmap once the current user is known
-  useEffect(() => {
-    if (!currentUser) return;
-    let cancelled = false;
-    async function fetchHeatmap() {
-      setHeatmapLoading(true);
-      try {
-        const res = await fetch(`/api/heatmap?userId=${currentUser!.id}&months=12`);
-        if (res.ok && !cancelled) {
-          const data = await res.json();
-          setHeatmapCounts(data.counts ?? {});
-        }
-      } catch (e) {
-        console.error('Failed to load heatmap data', e);
-      } finally {
-        if (!cancelled) setHeatmapLoading(false);
-      }
-    }
-    fetchHeatmap();
-    return () => { cancelled = true; };
-  }, [currentUser]);
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.value) {
@@ -225,12 +200,40 @@ export default function History() {
     void id;
   };
 
-  // Stats calculation
-  const totalTasksCount = tasks.length;
-  const completedTasksCount = tasks.filter(t => t.status === 'done').length;
-  const workingTasksCount = tasks.filter(t => t.status === 'working').length;
-  const groupCompletionRate = totalTasksCount > 0 ? Math.round((completedTasksCount / totalTasksCount) * 100) : 0;
+  // Selectable users list (merging users from board state and currentUser)
+  const selectableUsers = React.useMemo(() => {
+    const list = [...users];
+    if (currentUser && !list.some(u => u.id === currentUser.id)) {
+      list.unshift(currentUser);
+    }
+    return list;
+  }, [users, currentUser]);
+
+  // Which user is currently being viewed for the heatmap & stats
+  const effectiveUserId = selectedUserId || currentUser?.id || selectableUsers[0]?.id || '';
+  const selectedUser = selectableUsers.find(u => u.id === effectiveUserId) || currentUser || selectableUsers[0];
+  const selectedTheme = selectedUser ? (COLOR_THEMES[selectedUser.color] || COLOR_THEMES.indigo) : COLOR_THEMES.indigo;
+  const SelectedUserAvIcon = selectedUser ? (AVATAR_MAP[selectedUser.avatar] || Terminal) : Terminal;
+
+  // Selected user tasks for selectedDate
+  const userDayTasks = tasks.filter(t => t.userId === effectiveUserId);
+  const userCompletedTasksCount = userDayTasks.filter(t => t.status === 'done').length;
+  const userWorkingTasksCount = userDayTasks.filter(t => t.status === 'working').length;
+  const userTotalTasksCount = userDayTasks.length;
+  const userCompletionRate = userTotalTasksCount > 0 
+    ? Math.round((userCompletedTasksCount / userTotalTasksCount) * 100) 
+    : 0;
+
   const activeMembersToday = users.filter(u => tasks.some(t => t.userId === u.id)).length;
+
+  const handleSelectUser = (userId: string) => {
+    setSelectedUserId(userId);
+    setActiveMobileUserId(userId);
+  };
+
+  const handleHeatmapStatsChange = useCallback((stats: { totalCompleted: number; streak: number }) => {
+    setHeatmapStats({ totalCompleted: stats.totalCompleted, streak: stats.streak });
+  }, []);
 
   return (
     <div className="flex flex-col min-h-[100dvh] bg-[#050505] text-zinc-100 pb-20 relative overflow-hidden">
@@ -278,8 +281,70 @@ export default function History() {
       {/* Main Board Layout */}
       <main className="max-w-[1400px] w-full mx-auto px-4 mt-6 flex-1 flex flex-col z-10">
 
+        {/* ── User Switcher Bar ── */}
+        {selectableUsers.length > 0 && (
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3 px-1">
+            <div className="flex items-center gap-2">
+              <Users className="w-4 h-4 text-zinc-400" strokeWidth={1.5} />
+              <span className="text-xs font-semibold text-zinc-300 tracking-wide font-sans">
+                User Heatmap
+              </span>
+              <span className="text-[10px] text-zinc-500 font-mono">
+                · Viewing {selectedUser?.name ?? 'User'}
+              </span>
+            </div>
+
+            {/* Selectable user pills / tabs */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
+              {selectableUsers.map((user) => {
+                const isSelected = effectiveUserId === user.id;
+                const isMe = currentUser?.id === user.id;
+                const theme = COLOR_THEMES[user.color] || COLOR_THEMES.indigo;
+                const UserTabIcon = AVATAR_MAP[user.avatar] || Terminal;
+
+                return (
+                  <button
+                    key={user.id}
+                    type="button"
+                    onClick={() => handleSelectUser(user.id)}
+                    className={`group flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap border transition-all duration-200 cursor-pointer ${
+                      isSelected
+                        ? `bg-zinc-900 ${theme.border} text-white shadow-lg`
+                        : 'bg-zinc-950/40 border-white/5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60 hover:border-white/10'
+                    }`}
+                    style={isSelected ? { boxShadow: `0 0 16px ${theme.shadow}` } : undefined}
+                    title={`View ${user.name}'s contribution heatmap`}
+                  >
+                    <div
+                      className={`w-4 h-4 rounded-full flex items-center justify-center transition-colors ${
+                        isSelected ? theme.text : 'text-zinc-500 group-hover:text-zinc-400'
+                      }`}
+                    >
+                      <UserTabIcon className="w-3.5 h-3.5" strokeWidth={1.75} />
+                    </div>
+                    <span>{user.name}</span>
+                    {isMe && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded-full uppercase tracking-wider bg-white/10 text-zinc-300 font-semibold">
+                        You
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* ── Contribution Heatmap ── */}
-        {heatmapLoading ? (
+        {effectiveUserId ? (
+          <ContributionHeatmap
+            userId={effectiveUserId}
+            userColor={selectedUser?.color ?? 'indigo'}
+            userName={selectedUser?.name}
+            months={12}
+            onStatsChange={handleHeatmapStatsChange}
+          />
+        ) : (
           // Skeleton shimmer while data loads
           <div className="double-bezel-outer rounded-[1.75rem] p-1 mb-8 animate-pulse">
             <div className="double-bezel-inner rounded-[calc(1.75rem-0.25rem)] p-5 sm:p-6">
@@ -287,12 +352,6 @@ export default function History() {
               <div className="h-[92px] w-full bg-white/[0.03] rounded-xl" />
             </div>
           </div>
-        ) : (
-          <ContributionHeatmap
-            counts={heatmapCounts}
-            months={12}
-            userColor={currentUser?.color ?? 'indigo'}
-          />
         )}
 
         {/* Bento Stats Row */}
@@ -300,18 +359,32 @@ export default function History() {
           {/* Card 1: Completion rate progress */}
           <div className="double-bezel-outer rounded-[1.75rem] p-1">
             <div className="double-bezel-inner rounded-[calc(1.75rem-0.25rem)] p-5 flex items-center gap-4">
-              <div className="w-10 h-10 rounded-full bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+              <div className={`w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center ${selectedTheme.text}`}>
                 <CheckSquare className="w-5 h-5" strokeWidth={1.5} />
               </div>
-              <div className="flex-1">
-                <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">Day Progress</span>
-                <span className="block text-xl font-bold tracking-tight text-white font-mono mt-0.5">{groupCompletionRate}%</span>
+              <div className="flex-1 min-w-0">
+                <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">
+                  Day Progress
+                </span>
+                <span className="block text-xl font-bold tracking-tight text-white font-mono mt-0.5">
+                  {userCompletionRate}%
+                </span>
                 <div className="w-full bg-white/5 h-1.5 rounded-full mt-2 overflow-hidden border border-white/5">
                   <div 
-                    className="bg-indigo-500 h-full rounded-full transition-all duration-700 ease-out" 
-                    style={{ width: `${groupCompletionRate}%` }}
+                    className={`h-full rounded-full transition-all duration-700 ease-out ${
+                      selectedUser?.color === 'emerald' ? 'bg-emerald-500' :
+                      selectedUser?.color === 'rose' ? 'bg-rose-500' :
+                      selectedUser?.color === 'amber' ? 'bg-amber-500' :
+                      selectedUser?.color === 'purple' ? 'bg-purple-500' :
+                      selectedUser?.color === 'cyan' ? 'bg-cyan-500' :
+                      'bg-indigo-500'
+                    }`}
+                    style={{ width: `${userCompletionRate}%` }}
                   />
                 </div>
+                <p className="text-[10px] text-zinc-500 mt-1 font-mono truncate">
+                  {userCompletedTasksCount} of {userTotalTasksCount} tasks done ({selectedUser?.name ?? 'User'})
+                </p>
               </div>
             </div>
           </div>
@@ -322,31 +395,39 @@ export default function History() {
               <div className="w-10 h-10 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
                 <Activity className="w-5 h-5" strokeWidth={1.5} />
               </div>
-              <div className="flex-1">
-                <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">Day Velocity</span>
-                <span className="block text-xl font-bold tracking-tight text-white font-mono mt-0.5">
-                  {completedTasksCount} / {totalTasksCount} Done
+              <div className="flex-1 min-w-0">
+                <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">
+                  Day Velocity
                 </span>
-                <p className="text-[10px] text-zinc-500 mt-1 font-mono">
-                  {workingTasksCount} tasks ended in working state
+                <span className="block text-xl font-bold tracking-tight text-white font-mono mt-0.5">
+                  {userCompletedTasksCount} / {userTotalTasksCount} Done
+                </span>
+                <p className="text-[10px] text-zinc-500 mt-1 font-mono truncate">
+                  {userTotalTasksCount > 0 
+                    ? `${userWorkingTasksCount} tasks ended in working state` 
+                    : `No tasks logged on ${selectedDate}`}
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Card 3: Board Stats */}
+          {/* Card 3: Board / User Lane Details */}
           <div className="double-bezel-outer rounded-[1.75rem] p-1 sm:col-span-2 lg:col-span-1">
             <div className="double-bezel-inner rounded-[calc(1.75rem-0.25rem)] p-5 flex items-center gap-4">
-              <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-                <Users className="w-5 h-5" strokeWidth={1.5} />
+              <div className={`w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center ${selectedTheme.text}`}>
+                <SelectedUserAvIcon className="w-5 h-5" strokeWidth={1.5} />
               </div>
-              <div className="flex-1">
-                <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">Lanes Tracked</span>
-                <span className="block text-xl font-bold tracking-tight text-white font-mono mt-0.5">
-                  {activeMembersToday} Active Lanes
+              <div className="flex-1 min-w-0">
+                <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">
+                  Selected Lane
                 </span>
-                <p className="text-[10px] text-zinc-500 mt-1 font-mono">
-                  Archived state snapshot for user directory
+                <span className="block text-xl font-bold tracking-tight text-white font-mono mt-0.5 truncate">
+                  {selectedUser?.name ?? 'User'}
+                </span>
+                <p className="text-[10px] text-zinc-500 mt-1 font-mono truncate">
+                  {heatmapStats 
+                    ? `${heatmapStats.totalCompleted} done (12 mo) · ${heatmapStats.streak}d streak` 
+                    : `${activeMembersToday} active lanes on this date`}
                 </p>
               </div>
             </div>
@@ -362,7 +443,7 @@ export default function History() {
             return (
               <button
                 key={user.id}
-                onClick={() => setActiveMobileUserId(user.id)}
+                onClick={() => handleSelectUser(user.id)}
                 className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-xs font-semibold whitespace-nowrap border transition-all cursor-pointer ${
                   isActive 
                     ? `bg-zinc-900 border-white/20 text-white` 
@@ -397,6 +478,7 @@ export default function History() {
             {users.map((user) => {
               const theme = COLOR_THEMES[user.color] || COLOR_THEMES.indigo;
               const userTasks = tasks.filter(t => t.userId === user.id);
+              const isSelected = effectiveUserId === user.id;
               
               // Status counts
               const doneCount = userTasks.filter(t => t.status === 'done').length;
@@ -409,22 +491,37 @@ export default function History() {
               return (
                 <div 
                   key={user.id} 
-                  className={`double-bezel-outer rounded-[2.5rem] p-1.5 ${mobileHiddenClass} relative transition-all duration-500`}
+                  className={`double-bezel-outer rounded-[2.5rem] p-1.5 ${mobileHiddenClass} relative transition-all duration-300 ${
+                    isSelected ? 'ring-1 ring-white/20 shadow-lg' : ''
+                  }`}
+                  style={isSelected ? { boxShadow: `0 0 24px ${theme.shadow}` } : undefined}
                 >
                   <div className="double-bezel-inner rounded-[calc(2.5rem-0.375rem)] overflow-hidden relative">
                     {/* Glowing background accent */}
                     <div className={`absolute top-0 inset-x-0 h-24 bg-gradient-to-b ${theme.glow} pointer-events-none`} />
 
-                    {/* Column Header */}
-                    <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between bg-zinc-950/30 relative z-10">
+                    {/* Column Header — Clickable to switch heatmap view */}
+                    <button
+                      type="button"
+                      onClick={() => handleSelectUser(user.id)}
+                      className="w-full text-left px-5 py-4 border-b border-white/5 flex items-center justify-between bg-zinc-950/30 hover:bg-zinc-900/40 transition-colors relative z-10 cursor-pointer group"
+                      title={`Click to view ${user.name}'s contribution heatmap`}
+                    >
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-zinc-950/80 border border-white/5 flex items-center justify-center text-zinc-200">
-                          <UserLaneAvatar className="w-4 h-4 text-zinc-200" strokeWidth={1.5} />
+                        <div className={`w-9 h-9 rounded-xl bg-zinc-950/80 border border-white/5 flex items-center justify-center transition-colors ${isSelected ? theme.text : 'text-zinc-200'}`}>
+                          <UserLaneAvatar className="w-4 h-4" strokeWidth={1.5} />
                         </div>
                         <div>
-                          <h3 className="font-semibold text-xs text-zinc-200 flex items-center gap-1.5 font-sans">
-                            {user.name}
-                          </h3>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h3 className="font-semibold text-xs text-zinc-200 font-sans group-hover:text-white transition-colors">
+                              {user.name}
+                            </h3>
+                            {isSelected && (
+                              <span className="text-[8px] font-mono px-1.5 py-0.2 rounded-full uppercase tracking-wider bg-white/10 text-zinc-300 font-semibold border border-white/10">
+                                Active Heatmap
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[9px] text-zinc-500 font-semibold uppercase tracking-wider font-mono mt-0.5">
                             Snapshot Lane
                           </p>
@@ -435,7 +532,7 @@ export default function History() {
                       <div className={`text-[10px] font-bold font-mono px-2.5 py-1 rounded-full border ${theme.badge}`}>
                         {doneCount}/{totalCount}
                       </div>
-                    </div>
+                    </button>
 
                     {/* Column Content */}
                     <div className="p-4 flex flex-col gap-4 relative z-10 min-h-[250px]">

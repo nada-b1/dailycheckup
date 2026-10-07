@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 
 // ---------------------------------------------------------------------------
@@ -40,12 +40,20 @@ const DAY_LABELS   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const VISIBLE_DAY_INDICES = new Set([1, 3, 5]);
 
 interface ContributionHeatmapProps {
-  /** Sparse map of YYYY-MM-DD → number of tasks completed that day */
-  counts: Record<string, number>;
-  /** How many months the data covers (used for the summary copy only) */
+  /** User ID whose completed tasks heatmap is rendered */
+  userId: string;
+  /** Optional pre-fetched map of YYYY-MM-DD → number of tasks completed that day */
+  counts?: Record<string, number>;
+  /** How many months the data covers (default: 12) */
   months?: number;
   /** User's theme color — matches existing COLOR_THEMES keys */
   userColor?: string;
+  /** Optional user name for header display */
+  userName?: string;
+  /** Optional callback fired when stats (totalCompleted, streak) are calculated or updated */
+  onStatsChange?: (stats: { totalCompleted: number; streak: number; counts: Record<string, number> }) => void;
+  /** Optional extra classes */
+  className?: string;
 }
 
 interface DayCell {
@@ -56,11 +64,58 @@ interface DayCell {
 }
 
 export function ContributionHeatmap({
-  counts,
+  userId,
+  counts: externalCounts,
   months = 12,
   userColor = 'indigo',
+  userName,
+  onStatsChange,
+  className = '',
 }: ContributionHeatmapProps) {
+  const [internalCounts, setInternalCounts] = useState<Record<string, number>>(externalCounts || {});
+  const [loading, setLoading] = useState(false);
   const [tooltip, setTooltip] = useState<{ dateStr: string; count: number; x: number; y: number } | null>(null);
+
+  // Fetch heatmap data for the specific user whenever userId or months change,
+  // unless externalCounts was explicitly provided
+  useEffect(() => {
+    if (externalCounts !== undefined) {
+      setInternalCounts(externalCounts);
+      return;
+    }
+
+    if (!userId) return;
+
+    let cancelled = false;
+    setLoading(true);
+
+    fetch(`/api/heatmap?userId=${encodeURIComponent(userId)}&months=${months}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`Failed to fetch heatmap data (${res.status})`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setInternalCounts(data.counts || {});
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error(`Heatmap fetch error for user ${userId}:`, err);
+        if (!cancelled) {
+          setInternalCounts({});
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, months, externalCounts]);
+
+  const activeCounts = externalCounts !== undefined ? externalCounts : internalCounts;
 
   const accentPalette = ACCENT_COLORS[userColor] || ACCENT_COLORS.indigo;
 
@@ -96,7 +151,7 @@ export function ContributionHeatmap({
           const m = String(cursor.getMonth() + 1).padStart(2, '0');
           const day = String(cursor.getDate()).padStart(2, '0');
           const dateStr = `${y}-${m}-${day}`;
-          const count = counts[dateStr] ?? 0;
+          const count = activeCounts[dateStr] ?? 0;
 
           // Attach month label to the first cell in the column when month changes
           let monthLabel: string | undefined;
@@ -113,17 +168,24 @@ export function ContributionHeatmap({
     }
 
     // Compute summary stats
-    const totalCompleted = Object.values(counts).reduce((s, n) => s + n, 0);
+    const totalCompleted = Object.values(activeCounts).reduce((s, n) => s + n, 0);
 
-    // Current streak: consecutive days (going backwards from today) with ≥1 task done
+    // Current streak: consecutive days (going backwards from today or yesterday) with ≥1 task done
     let streak = 0;
     const streakCursor = new Date(today);
+    const todayDs = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    
+    // If no tasks completed today yet, start counting from yesterday so active streak is preserved
+    if ((activeCounts[todayDs] ?? 0) === 0) {
+      streakCursor.setDate(streakCursor.getDate() - 1);
+    }
+
     while (true) {
       const y = streakCursor.getFullYear();
       const m = String(streakCursor.getMonth() + 1).padStart(2, '0');
       const d = String(streakCursor.getDate()).padStart(2, '0');
       const ds = `${y}-${m}-${d}`;
-      if ((counts[ds] ?? 0) > 0) {
+      if ((activeCounts[ds] ?? 0) > 0) {
         streak++;
         streakCursor.setDate(streakCursor.getDate() - 1);
       } else {
@@ -132,7 +194,15 @@ export function ContributionHeatmap({
     }
 
     return { weeks: weekColumns, totalCompleted, streak };
-  }, [counts, months]);
+  }, [activeCounts, months]);
+
+  // Notify parent of updated stats
+  const onStatsChangeRef = React.useRef(onStatsChange);
+  onStatsChangeRef.current = onStatsChange;
+
+  useEffect(() => {
+    onStatsChangeRef.current?.({ totalCompleted, streak, counts: activeCounts });
+  }, [totalCompleted, streak, activeCounts]);
 
   // Format a date string for tooltip / aria-label
   const formatDate = (dateStr: string) => {
@@ -144,22 +214,35 @@ export function ContributionHeatmap({
 
   return (
     <motion.div
+      key={`${userId}-${userColor}`}
       initial={{ opacity: 0, y: 16, filter: 'blur(6px)' }}
       animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
       transition={{ type: 'spring', stiffness: 80, damping: 20, delay: 0.05 }}
-      className="double-bezel-outer rounded-[1.75rem] p-1 mb-8"
+      className={`double-bezel-outer rounded-[1.75rem] p-1 mb-8 ${className}`}
     >
       <div className="double-bezel-inner rounded-[calc(1.75rem-0.25rem)] p-5 sm:p-6 overflow-hidden">
 
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
           <div>
-            <span className="block text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono mb-1">
-              Productivity Heatmap
-            </span>
-            <h2 className="text-sm font-semibold text-zinc-100 font-sans">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-[9px] font-semibold text-zinc-500 uppercase tracking-widest font-mono">
+                Productivity Heatmap
+              </span>
+              {loading && (
+                <span className="text-[9px] text-zinc-500 font-mono animate-pulse">
+                  Updating...
+                </span>
+              )}
+            </div>
+            <h2 className="text-sm font-semibold text-zinc-100 font-sans flex items-center gap-2 flex-wrap">
               Completion Activity
-              <span className="ml-2 text-[10px] font-normal text-zinc-500 font-mono">
+              {userName && (
+                <span className="text-[11px] font-medium text-zinc-300 font-mono px-2 py-0.5 rounded-full bg-white/[0.05] border border-white/10">
+                  {userName}
+                </span>
+              )}
+              <span className="text-[10px] font-normal text-zinc-500 font-mono">
                 last {months} months
               </span>
             </h2>
