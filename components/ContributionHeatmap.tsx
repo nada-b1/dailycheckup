@@ -119,10 +119,6 @@ export function ContributionHeatmap({
 
   const accentPalette = ACCENT_COLORS[userColor] || ACCENT_COLORS.indigo;
 
-  // ---------------------------------------------------------------------------
-  // Build the week columns for the last `months` worth of data.
-  // The grid always starts on a Sunday and ends on today (inclusive).
-  // ---------------------------------------------------------------------------
   const { weeks, totalCompleted, streak } = useMemo(() => {
     // Compute today in local time (no timezone offset needed here — server
     // already constrained the date range, we just need a stable "today" for UI)
